@@ -214,7 +214,7 @@ resource "yandex_storage_object" "index_html" {
   content_type = "text/html; charset=utf-8"
 
   content = templatefile("${path.module}/static/index.html", {
-    api_gateway_url = yandex_api_gateway.weather_api.domain
+    api_gateway_url = "https://${yandex_api_gateway.weather_api.domain}"
   })
 
   depends_on = [
