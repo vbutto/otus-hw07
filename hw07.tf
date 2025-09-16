@@ -20,25 +20,25 @@ resource "yandex_iam_service_account" "weather_sa" {
   folder_id   = var.folder_id
 }
 
-# Минимально необходимые роли для функций и доступа
 resource "yandex_resourcemanager_folder_iam_member" "weather_sa_invoker" {
-  folder_id = var.folder_id
-  role      = "serverless.functions.invoker"
-  member    = "serviceAccount:${yandex_iam_service_account.weather_sa.id}"
+  folder_id  = var.folder_id
+  role       = "serverless.functions.invoker"
+  member     = "serviceAccount:${yandex_iam_service_account.weather_sa.id}"
+  depends_on = [yandex_iam_service_account.weather_sa]
 }
 
 resource "yandex_resourcemanager_folder_iam_member" "weather_sa_editor" {
-  folder_id = var.folder_id
-  role      = "editor"
-  member    = "serviceAccount:${yandex_iam_service_account.weather_sa.id}"
+  folder_id  = var.folder_id
+  role       = "editor"
+  member     = "serviceAccount:${yandex_iam_service_account.weather_sa.id}"
+  depends_on = [yandex_iam_service_account.weather_sa]
 }
 
-# Роль для управления БД (создание пользователей/БД мы делаем из Terraform,
-# а функциям нужен только сетевой доступ — см. секцию SG ниже)
 resource "yandex_resourcemanager_folder_iam_member" "weather_sa_mdb_admin" {
-  folder_id = var.folder_id
-  role      = "mdb.admin"
-  member    = "serviceAccount:${yandex_iam_service_account.weather_sa.id}"
+  folder_id  = var.folder_id
+  role       = "mdb.admin"
+  member     = "serviceAccount:${yandex_iam_service_account.weather_sa.id}"
+  depends_on = [yandex_iam_service_account.weather_sa]
 }
 
 # ============================================================================
@@ -51,10 +51,10 @@ resource "yandex_vpc_network" "weather_network" {
   folder_id   = var.folder_id
 }
 
-# NAT для исходящего трафика функций (внешние API), без публичных IP у ресурсов
 resource "yandex_vpc_gateway" "nat_gw" {
   name = "weather-nat-gw"
   shared_egress_gateway {}
+  depends_on = [yandex_vpc_network.weather_network]
 }
 
 resource "yandex_vpc_route_table" "weather_rt" {
@@ -64,6 +64,8 @@ resource "yandex_vpc_route_table" "weather_rt" {
     destination_prefix = "0.0.0.0/0"
     gateway_id         = yandex_vpc_gateway.nat_gw.id
   }
+
+  depends_on = [yandex_vpc_gateway.nat_gw]
 }
 
 resource "yandex_vpc_subnet" "weather_subnet" {
@@ -72,8 +74,9 @@ resource "yandex_vpc_subnet" "weather_subnet" {
   network_id     = yandex_vpc_network.weather_network.id
   v4_cidr_blocks = ["10.1.0.0/24"]
   folder_id      = var.folder_id
-
   route_table_id = yandex_vpc_route_table.weather_rt.id
+
+  depends_on = [yandex_vpc_route_table.weather_rt]
 }
 
 # ============================================================================
@@ -99,6 +102,8 @@ resource "yandex_vpc_security_group" "weather_db_sg" {
     port           = -1
     v4_cidr_blocks = ["0.0.0.0/0"]
   }
+
+  depends_on = [yandex_vpc_subnet.weather_subnet]
 }
 
 # ============================================================================
@@ -127,18 +132,27 @@ resource "yandex_mdb_postgresql_cluster" "weather_db" {
     subnet_id        = yandex_vpc_subnet.weather_subnet.id
     assign_public_ip = false
   }
+
+  depends_on = [
+    yandex_vpc_security_group.weather_db_sg,
+    yandex_vpc_subnet.weather_subnet
+  ]
 }
 
 resource "yandex_mdb_postgresql_user" "weather_user" {
   cluster_id = yandex_mdb_postgresql_cluster.weather_db.id
   name       = "weather_user"
   password   = "WeatherPass123!"
+
+  depends_on = [yandex_mdb_postgresql_cluster.weather_db]
 }
 
 resource "yandex_mdb_postgresql_database" "weather_stats" {
   cluster_id = yandex_mdb_postgresql_cluster.weather_db.id
   name       = "weather_stats"
   owner      = yandex_mdb_postgresql_user.weather_user.name
+
+  depends_on = [yandex_mdb_postgresql_user.weather_user]
 }
 
 # ============================================================================
@@ -152,14 +166,16 @@ resource "yandex_iam_service_account" "storage_sa" {
 }
 
 resource "yandex_resourcemanager_folder_iam_member" "storage_sa_admin" {
-  folder_id = var.folder_id
-  role      = "storage.admin"
-  member    = "serviceAccount:${yandex_iam_service_account.storage_sa.id}"
+  folder_id  = var.folder_id
+  role       = "storage.admin"
+  member     = "serviceAccount:${yandex_iam_service_account.storage_sa.id}"
+  depends_on = [yandex_iam_service_account.storage_sa]
 }
 
 resource "yandex_iam_service_account_static_access_key" "storage_key" {
   service_account_id = yandex_iam_service_account.storage_sa.id
   description        = "Static access key for weather app storage"
+  depends_on         = [yandex_resourcemanager_folder_iam_member.storage_sa_admin]
 }
 
 resource "random_id" "bucket_suffix" {
@@ -186,9 +202,10 @@ resource "yandex_storage_bucket" "weather_static" {
     expose_headers  = ["ETag"]
     max_age_seconds = 3000
   }
+
+  depends_on = [yandex_iam_service_account_static_access_key.storage_key]
 }
 
-# Простая HTML-страница с автоопределением геолокации (должен существовать ./static/index.html)
 resource "yandex_storage_object" "index_html" {
   access_key   = yandex_iam_service_account_static_access_key.storage_key.access_key
   secret_key   = yandex_iam_service_account_static_access_key.storage_key.secret_key
@@ -199,13 +216,17 @@ resource "yandex_storage_object" "index_html" {
   content = templatefile("${path.module}/static/index.html", {
     api_gateway_url = yandex_api_gateway.weather_api.domain
   })
+
+  depends_on = [
+    yandex_storage_bucket.weather_static,
+    yandex_api_gateway.weather_api
+  ]
 }
 
 # ============================================================================
 # Cloud Functions: обе функции в одной VPC (connectivity), без публичных IP
 # ============================================================================
 
-# Function 2: Weather Forecast
 resource "yandex_function" "weather_forecast" {
   name               = "weather-forecast"
   description        = "Function to get weather forecast from external API"
@@ -217,24 +238,25 @@ resource "yandex_function" "weather_forecast" {
   service_account_id = yandex_iam_service_account.weather_sa.id
   folder_id          = var.folder_id
 
-  # Подключение к VPC (для выхода через NAT и, при необходимости, доступов к приватным ресурсам)
   connectivity {
     network_id = yandex_vpc_network.weather_network.id
-    subnet_ids = [yandex_vpc_subnet.weather_subnet.id]
   }
 
   environment = {
-    # Если ключ пустой, в коде F2 вернутся mock-данные
     WEATHER_API_KEY = var.weather_api_key != "" ? var.weather_api_key : "mock"
   }
 
-  # Ожидается архив с кодом (в корне должен лежать function2_weather_forecast.py)
   content {
     zip_filename = "weather_forecast.zip"
   }
+
+  depends_on = [
+    yandex_iam_service_account.weather_sa,
+    yandex_resourcemanager_folder_iam_member.weather_sa_invoker,
+    yandex_vpc_subnet.weather_subnet
+  ]
 }
 
-# Function 1: Weather Context
 resource "yandex_function" "weather_context" {
   name               = "weather-context"
   description        = "Function to save user statistics and call weather forecast"
@@ -248,12 +270,8 @@ resource "yandex_function" "weather_context" {
 
   connectivity {
     network_id = yandex_vpc_network.weather_network.id
-    subnet_ids = [yandex_vpc_subnet.weather_subnet.id]
   }
 
-  # Важное: тут мы НЕ делаем публичный HTTP-триггер F2.
-  # F1 вызывает F2 через Invoke API (https://functions.yandexcloud.net/<function_id>)
-  # c IAM-токеном; NAT обеспечивает исходящий интернет.
   environment = {
     DB_HOST     = yandex_mdb_postgresql_cluster.weather_db.host[0].fqdn
     DB_NAME     = "weather_stats"
@@ -262,15 +280,18 @@ resource "yandex_function" "weather_context" {
     DB_PORT     = "6432"
 
     FORECAST_FUNCTION_ID = yandex_function.weather_forecast.id
-    # Опционально (если хочешь переопределить endpoint):
-    # CLOUD_FUNCTIONS_API_ENDPOINT = "https://functions.yandexcloud.net"
   }
 
   content {
     zip_filename = "weather_context.zip"
   }
 
-  depends_on = [yandex_function.weather_forecast]
+  depends_on = [
+    yandex_function.weather_forecast,             # F2 должна существовать раньше F1
+    yandex_mdb_postgresql_database.weather_stats, # DB + schema owner готовы
+    yandex_vpc_subnet.weather_subnet,
+    yandex_resourcemanager_folder_iam_member.weather_sa_invoker
+  ]
 }
 
 # ============================================================================
@@ -383,6 +404,12 @@ x-yc-apigateway-cors:
   headers: 'Content-Type'
   credentials: false
 EOT
+
+  depends_on = [
+    yandex_function.weather_context,
+    yandex_storage_bucket.weather_static,
+    yandex_iam_service_account.storage_sa
+  ]
 }
 
 # ============================================================================

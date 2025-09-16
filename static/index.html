@@ -1,327 +1,47 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ru">
 
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Weather Forecast Service</title>
+    <meta charset="utf-8" />
+    <title>Weather demo</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
         body {
-            font-family: Arial, sans-serif;
+            font-family: system-ui, sans-serif;
             max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
-            background: linear-gradient(135deg, #74b9ff, #0984e3);
-            min-height: 100vh;
+            margin: 40px auto;
+            padding: 0 16px
         }
 
-        .container {
-            background: white;
-            border-radius: 10px;
-            padding: 30px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
-        }
-
-        .header {
-            text-align: center;
-            margin-bottom: 30px;
-        }
-
-        .header h1 {
-            color: #2d3436;
-            margin: 0;
-        }
-
-        .status {
-            padding: 15px;
-            border-radius: 5px;
-            margin: 20px 0;
-            text-align: center;
-        }
-
-        .loading {
-            background: #74b9ff;
-            color: white;
-        }
-
-        .success {
-            background: #00b894;
-            color: white;
-        }
-
-        .error {
-            background: #ff7675;
-            color: white;
-        }
-
-        .weather-info {
-            background: #f8f9fa;
-            padding: 20px;
+        pre {
+            background: #f6f8fa;
+            padding: 12px;
             border-radius: 8px;
-            margin: 20px 0;
-        }
-
-        .weather-item {
-            background: white;
-            margin: 10px 0;
-            padding: 15px;
-            border-radius: 5px;
-            border-left: 4px solid #74b9ff;
-        }
-
-        .demo-card {
-            border-left-color: #ff7675;
-            background: linear-gradient(45deg, #fff 98%, #ff7675 98%);
-            position: relative;
-        }
-
-        .coordinates {
-            background: #e8f4f8;
-            padding: 10px;
-            border-radius: 5px;
-            font-size: 0.9em;
-            color: #636e72;
-            margin: 10px 0;
-        }
-
-        .footer {
-            text-align: center;
-            margin-top: 30px;
-            color: #636e72;
-            font-size: 0.9em;
-        }
-
-        .spinner {
-            border: 4px solid #f3f3f3;
-            border-top: 4px solid #74b9ff;
-            border-radius: 50%;
-            width: 30px;
-            height: 30px;
-            animation: spin 1s linear infinite;
-            margin: 10px auto;
-        }
-
-        @keyframes spin {
-            0% {
-                transform: rotate(0deg);
-            }
-
-            100% {
-                transform: rotate(360deg);
-            }
+            overflow: auto
         }
     </style>
 </head>
 
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>🌤️ Weather Forecast Service</h1>
-            <p>Автоматическое определение геолокации и прогноз погоды</p>
-        </div>
-
-        <div id="status" class="status loading">
-            <div class="spinner"></div>
-            Определяем ваше местоположение...
-        </div>
-
-        <div id="coordinates" class="coordinates" style="display: none;"></div>
-
-        <div id="weather" style="display: none;"></div>
-
-        <div class="footer">
-            <p>Serverless Weather Service</p>
-            <p>API Gateway → Function 1 (Context) → Function 2 (Forecast) → Yandex Weather API</p>
-            <p>Powered by Yandex Cloud</p>
-        </div>
-    </div>
-
+    <h1>Weather demo</h1>
+    <p>Получаю координаты и запрашиваю прогноз через API Gateway…</p>
+    <pre id="out">Жду геолокацию…</pre>
     <script>
-        var API_BASE_URL = '${api_gateway_url}';
-
-        // Автоматически начинаем процесс при загрузке страницы
-        window.addEventListener('load', function () {
-            getLocationAndWeather();
-        });
-
-        function getLocationAndWeather() {
-            if (!navigator.geolocation) {
-                showError('Геолокация не поддерживается вашим браузером');
-                return;
+        (async () => {
+            const out = document.getElementById('out');
+            try {
+                const pos = await new Promise((res, rej) =>
+                    navigator.geolocation.getCurrentPosition(res, rej, { timeout: 5000 }));
+                const lat = pos.coords.latitude, lon = pos.coords.longitude;
+                const url = '${api_gateway_url}/weather?lat=' + lat.toFixed(4) + '&lon=' + lon.toFixed(4) + '&days=3';
+                out.textContent = 'GET ' + url;
+                const r = await fetch(url);
+                const j = await r.json();
+                out.textContent = JSON.stringify(j, null, 2);
+            } catch (e) {
+                out.textContent = 'Ошибка: ' + e;
             }
-
-            var options = {
-                enableHighAccuracy: true,
-                timeout: 15000,
-                maximumAge: 300000
-            };
-
-            navigator.geolocation.getCurrentPosition(
-                function (position) {
-                    var lat = position.coords.latitude;
-                    var lon = position.coords.longitude;
-                    showCoordinates(lat, lon, position.coords.accuracy);
-                    getWeather(lat, lon);
-                },
-                function (error) {
-                    var message = 'Не удалось определить местоположение: ';
-                    switch (error.code) {
-                        case error.PERMISSION_DENIED:
-                            message += 'Доступ запрещен. Разрешите геолокацию в браузере.';
-                            break;
-                        case error.POSITION_UNAVAILABLE:
-                            message += 'Местоположение недоступно.';
-                            break;
-                        case error.TIMEOUT:
-                            message += 'Превышено время ожидания.';
-                            break;
-                        default:
-                            message += 'Неизвестная ошибка.';
-                    }
-                    showError(message);
-                },
-                options
-            );
-        }
-
-        function showCoordinates(lat, lon, accuracy) {
-            var coordsDiv = document.getElementById('coordinates');
-            coordsDiv.style.display = 'block';
-            var html = '<strong>📍 Ваши координаты:</strong><br>';
-            html += 'Широта: ' + lat.toFixed(6) + '<br>';
-            html += 'Долгота: ' + lon.toFixed(6) + '<br>';
-            if (accuracy) {
-                html += 'Точность: ±' + Math.round(accuracy) + ' метров';
-            }
-            coordsDiv.innerHTML = html;
-        }
-
-        function getWeather(lat, lon) {
-            showStatus('Получаем прогноз погоды...', 'loading');
-
-            var userId = 'web_' + Math.random().toString(36).substr(2, 9);
-            var days = 5;
-
-            var url = API_BASE_URL + '/weather?lat=' + lat + '&lon=' + lon + '&days=' + days + '&user_id=' + userId;
-
-            fetch(url)
-                .then(function (response) {
-                    if (!response.ok) {
-                        throw new Error('HTTP ' + response.status + ': ' + response.statusText);
-                    }
-                    return response.json();
-                })
-                .then(function (data) {
-                    if (data.error) {
-                        throw new Error(data.error);
-                    }
-                    showWeather(data);
-                    showStatus('Прогноз погоды успешно получен!', 'success');
-                })
-                .catch(function (error) {
-                    console.error('Weather API error:', error);
-                    showError('Ошибка получения погоды: ' + error.message);
-                });
-        }
-
-        function showWeather(data) {
-            var weatherDiv = document.getElementById('weather');
-            weatherDiv.style.display = 'block';
-
-            var weatherHtml = '<div class="weather-info">';
-
-            // Проверяем, используются ли mock данные
-            var isMockData = data.data_source && (data.data_source.includes('Mock') || data.data_source.includes('mock') || data.data_source.includes('демонстрация'));
-
-            if (isMockData) {
-                weatherHtml += '<div style="background: #ff7675; color: white; padding: 15px; border-radius: 10px; margin-bottom: 20px; text-align: center; font-weight: bold;">';
-                weatherHtml += 'DEMO MODE - Демонстрационные данные<br>';
-                weatherHtml += '<small style="font-weight: normal;">Получите API ключ Yandex Weather для реальных данных о погоде</small>';
-                weatherHtml += '</div>';
-            }
-
-            weatherHtml += '<h3>🌍 ' + data.location + (data.country ? ', ' + data.country : '') + '</h3>';
-            weatherHtml += '<p>Прогноз на ' + data.forecast_days + ' дней:</p>';
-
-            if (data.note) {
-                weatherHtml += '<p style="color: #e17055; font-style: italic;">⚠️ ' + data.note + '</p>';
-            }
-
-            for (var i = 0; i < data.forecast.length; i++) {
-                var day = data.forecast[i];
-                var date = new Date(day.date);
-                var dateStr = date.toLocaleDateString('ru-RU', {
-                    weekday: 'long',
-                    day: 'numeric',
-                    month: 'long'
-                });
-
-                var cardClass = isMockData ? 'weather-item demo-card' : 'weather-item';
-
-                weatherHtml += '<div class="' + cardClass + '">';
-                weatherHtml += '<strong>' + dateStr + '</strong><br>';
-                weatherHtml += '<div style="font-size: 1.5em; color: #74b9ff; margin: 10px 0;">';
-                weatherHtml += getWeatherIcon(day.weather.main) + ' ' + day.temperature.day + '°C';
-                if (isMockData) {
-                    weatherHtml += ' <span style="font-size: 0.6em; color: #636e72;">[DEMO]</span>';
-                }
-                weatherHtml += '</div>';
-                weatherHtml += '<div style="color: #636e72;">';
-                weatherHtml += day.weather.description + '<br>';
-                weatherHtml += '🌡️ от ' + day.temperature.min + '° до ' + day.temperature.max + '°C<br>';
-                weatherHtml += '🤚 Ощущается как ' + day.temperature.feels_like + '°C<br>';
-                weatherHtml += '💨 Ветер: ' + day.wind_speed + ' м/с<br>';
-                weatherHtml += '💧 Влажность: ' + day.humidity + '%<br>';
-                weatherHtml += '☁️ Облачность: ' + day.clouds + '%';
-                weatherHtml += '</div>';
-                weatherHtml += '</div>';
-            }
-
-            weatherHtml += '<p style="text-align: center; color: #636e72; font-size: 0.9em; margin-top: 20px;">';
-            weatherHtml += '📊 Источник: ' + (data.data_source || 'Yandex Weather API');
-            if (isMockData) {
-                weatherHtml += ' <span style="background: #ff7675; color: white; padding: 2px 8px; border-radius: 10px; font-size: 0.8em;">DEMO</span>';
-            }
-            weatherHtml += '<br>📅 Данные получены: ' + new Date(data.generated_at).toLocaleString('ru-RU');
-            weatherHtml += '</p>';
-            weatherHtml += '</div>';
-
-            weatherDiv.innerHTML = weatherHtml;
-        }
-
-        function getWeatherIcon(weatherMain) {
-            var icons = {
-                'Clear': '☀️',
-                'Clouds': '☁️',
-                'Rain': '🌧️',
-                'Drizzle': '🌦️',
-                'Thunderstorm': '⛈️',
-                'Snow': '❄️',
-                'Mist': '🌫️',
-                'Fog': '🌫️'
-            };
-            return icons[weatherMain] || '🌤️';
-        }
-
-        function showStatus(message, type) {
-            var statusDiv = document.getElementById('status');
-            statusDiv.className = 'status ' + type;
-
-            if (type === 'loading') {
-                statusDiv.innerHTML = '<div class="spinner"></div>' + message;
-            } else {
-                statusDiv.innerHTML = message;
-            }
-        }
-
-        function showError(message) {
-            showStatus(message, 'error');
-
-            // Скрываем статус через 10 секунд
-            setTimeout(function () {
-                document.getElementById('status').style.display = 'none';
-            }, 10000);
-        }
+        })();
     </script>
 </body>
 
