@@ -1,10 +1,18 @@
 # Роли сервисного аккаунта для terraform
-# iam.serviceAccounts.admin - для создания сервисных аккаунтов
-# container-registry.admin - для создания реестра и назначения прав
 # vpc.publicAdmin - для создания VPC-сети и подсети
 # vpc.privateAdmin - для создания VPC-сети и подсети
-# vpc.user
+# iam.serviceAccounts.admin - для создания сервисных аккаунтов
+# managed-postgresql.admin - для создания кластера PostgreSQL
+# storage.admin - для создания бакета в Object Storage
+# storage.editor - для записи/удаления объектов в бакет
 # vpc.securityGroups.admin - для создания security group
+# mdb.admin - для создания пользователей и БД в PostgreSQL
+# functions.admin - для создания Cloud Functions
+# api-gateway.admin - для создания API Gateway
+
+# container-registry.admin - для создания реестра и назначения прав
+# vpc.user
+
 # compute.admin - для создания группы ВМ
 # k8s.admin - для создания кластера k8s
 
@@ -120,6 +128,8 @@ resource "yandex_storage_bucket" "weather_static" {
   bucket     = "weather-app-static-${random_id.bucket_suffix.hex}"
   folder_id  = var.folder_id
 
+  force_destroy = true
+
   website {
     index_document = "index.html"
     error_document = "error.html"
@@ -143,8 +153,9 @@ resource "yandex_storage_object" "index_html" {
   content_type = "text/html; charset=utf-8"
 
   content = templatefile("${path.module}/static/index.html", {
-    api_gateway_url = "https://${yandex_api_gateway.weather_api.id}.apigw.yandexcloud.net"
+    api_gateway_url = yandex_api_gateway.weather_api.domain
   })
+
 }
 
 # ============================================================================
@@ -164,9 +175,8 @@ resource "yandex_function" "weather_forecast" {
   folder_id          = var.folder_id
 
   environment = {
-    WEATHER_API_KEY = var.weather_api_key
+    WEATHER_API_KEY = var.weather_api_key != "" ? var.weather_api_key : "mock"
   }
-
   content {
     zip_filename = "weather_forecast.zip"
   }
@@ -354,7 +364,7 @@ resource "yandex_vpc_security_group" "weather_db_sg" {
 
 output "weather_app_url" {
   description = "URL of the weather application"
-  value       = "https://${yandex_api_gateway.weather_api.id}.apigw.yandexcloud.net"
+  value       = yandex_api_gateway.weather_api.domain
 }
 
 output "api_gateway_id" {
@@ -383,11 +393,12 @@ output "storage_bucket_name" {
   value       = yandex_storage_bucket.weather_static.id
 }
 
+
 output "test_commands" {
   description = "Commands to test the application"
   value = {
-    web_app      = "Open: https://${yandex_api_gateway.weather_api.id}.apigw.yandexcloud.net"
-    health_check = "curl https://${yandex_api_gateway.weather_api.id}.apigw.yandexcloud.net/health"
-    api_test     = "curl 'https://${yandex_api_gateway.weather_api.id}.apigw.yandexcloud.net/weather?lat=55.7558&lon=37.6176&days=3'"
+    web_app      = "Open: ${yandex_api_gateway.weather_api.domain}"
+    health_check = "curl ${yandex_api_gateway.weather_api.domain}/health"
+    api_test     = "curl '${yandex_api_gateway.weather_api.domain}/weather?lat=55.7558&lon=37.6176&days=3'"
   }
 }

@@ -60,7 +60,7 @@ def get_weather_forecast(lat, lon, days):
         # Используем Yandex Weather API
         api_key = os.environ.get('WEATHER_API_KEY')
         
-        if not api_key:
+        if not api_key or api_key == "mock":
             # Если нет API ключа, возвращаем mock данные
             logger.warning("No Yandex Weather API key provided, returning mock data")
             return generate_mock_forecast_by_coords(lat, lon, days)

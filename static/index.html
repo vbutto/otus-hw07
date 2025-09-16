@@ -69,6 +69,12 @@
             border-left: 4px solid #74b9ff;
         }
 
+        .demo-card {
+            border-left-color: #ff7675;
+            background: linear-gradient(45deg, #fff 98%, #ff7675 98%);
+            position: relative;
+        }
+
         .coordinates {
             background: #e8f4f8;
             padding: 10px;
@@ -223,8 +229,20 @@
             weatherDiv.style.display = 'block';
 
             var weatherHtml = '<div class="weather-info">';
+
+            // Проверяем, используются ли mock данные
+            var isMockData = data.data_source && (data.data_source.includes('Mock') || data.data_source.includes('mock') || data.data_source.includes('демонстрация'));
+
+            if (isMockData) {
+                weatherHtml += '<div style="background: #ff7675; color: white; padding: 15px; border-radius: 10px; margin-bottom: 20px; text-align: center; font-weight: bold;">';
+                weatherHtml += 'DEMO MODE - Демонстрационные данные<br>';
+                weatherHtml += '<small style="font-weight: normal;">Получите API ключ Yandex Weather для реальных данных о погоде</small>';
+                weatherHtml += '</div>';
+            }
+
             weatherHtml += '<h3>🌍 ' + data.location + (data.country ? ', ' + data.country : '') + '</h3>';
             weatherHtml += '<p>Прогноз на ' + data.forecast_days + ' дней:</p>';
+
             if (data.note) {
                 weatherHtml += '<p style="color: #e17055; font-style: italic;">⚠️ ' + data.note + '</p>';
             }
@@ -238,10 +256,15 @@
                     month: 'long'
                 });
 
-                weatherHtml += '<div class="weather-item">';
+                var cardClass = isMockData ? 'weather-item demo-card' : 'weather-item';
+
+                weatherHtml += '<div class="' + cardClass + '">';
                 weatherHtml += '<strong>' + dateStr + '</strong><br>';
                 weatherHtml += '<div style="font-size: 1.5em; color: #74b9ff; margin: 10px 0;">';
                 weatherHtml += getWeatherIcon(day.weather.main) + ' ' + day.temperature.day + '°C';
+                if (isMockData) {
+                    weatherHtml += ' <span style="font-size: 0.6em; color: #636e72;">[DEMO]</span>';
+                }
                 weatherHtml += '</div>';
                 weatherHtml += '<div style="color: #636e72;">';
                 weatherHtml += day.weather.description + '<br>';
@@ -255,8 +278,11 @@
             }
 
             weatherHtml += '<p style="text-align: center; color: #636e72; font-size: 0.9em; margin-top: 20px;">';
-            weatherHtml += '📊 Источник: ' + (data.data_source || 'Yandex Weather API') + '<br>';
-            weatherHtml += '📅 Данные получены: ' + new Date(data.generated_at).toLocaleString('ru-RU');
+            weatherHtml += '📊 Источник: ' + (data.data_source || 'Yandex Weather API');
+            if (isMockData) {
+                weatherHtml += ' <span style="background: #ff7675; color: white; padding: 2px 8px; border-radius: 10px; font-size: 0.8em;">DEMO</span>';
+            }
+            weatherHtml += '<br>📅 Данные получены: ' + new Date(data.generated_at).toLocaleString('ru-RU');
             weatherHtml += '</p>';
             weatherHtml += '</div>';
 
