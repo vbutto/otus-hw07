@@ -10,14 +10,8 @@
 # functions.admin - для создания Cloud Functions
 # api-gateway.admin - для создания API Gateway
 
-# container-registry.admin - для создания реестра и назначения прав
-# vpc.user
-
-# compute.admin - для создания группы ВМ
-# k8s.admin - для создания кластера k8s
-
 # ============================================================================
-# Сервисный аккаунт для Cloud Functions
+# Сервисные аккаунты и роли
 # ============================================================================
 
 resource "yandex_iam_service_account" "weather_sa" {
@@ -26,7 +20,7 @@ resource "yandex_iam_service_account" "weather_sa" {
   folder_id   = var.folder_id
 }
 
-# Роли для сервисного аккаунта
+# Минимально необходимые роли для функций и доступа
 resource "yandex_resourcemanager_folder_iam_member" "weather_sa_invoker" {
   folder_id = var.folder_id
   role      = "serverless.functions.invoker"
@@ -39,14 +33,16 @@ resource "yandex_resourcemanager_folder_iam_member" "weather_sa_editor" {
   member    = "serviceAccount:${yandex_iam_service_account.weather_sa.id}"
 }
 
-resource "yandex_resourcemanager_folder_iam_member" "weather_sa_db_admin" {
+# Роль для управления БД (создание пользователей/БД мы делаем из Terraform,
+# а функциям нужен только сетевой доступ — см. секцию SG ниже)
+resource "yandex_resourcemanager_folder_iam_member" "weather_sa_mdb_admin" {
   folder_id = var.folder_id
   role      = "mdb.admin"
   member    = "serviceAccount:${yandex_iam_service_account.weather_sa.id}"
 }
 
 # ============================================================================
-# Managed PostgreSQL для хранения статистики
+# VPC: сеть, NAT-шлюз, таблица маршрутов, подсеть
 # ============================================================================
 
 resource "yandex_vpc_network" "weather_network" {
@@ -55,22 +51,70 @@ resource "yandex_vpc_network" "weather_network" {
   folder_id   = var.folder_id
 }
 
+# NAT для исходящего трафика функций (внешние API), без публичных IP у ресурсов
+resource "yandex_vpc_gateway" "nat_gw" {
+  name = "weather-nat-gw"
+  shared_egress_gateway {}
+}
+
+resource "yandex_vpc_route_table" "weather_rt" {
+  network_id = yandex_vpc_network.weather_network.id
+
+  static_route {
+    destination_prefix = "0.0.0.0/0"
+    gateway_id         = yandex_vpc_gateway.nat_gw.id
+  }
+}
+
 resource "yandex_vpc_subnet" "weather_subnet" {
   name           = "weather-subnet"
   zone           = var.zone
   network_id     = yandex_vpc_network.weather_network.id
   v4_cidr_blocks = ["10.1.0.0/24"]
   folder_id      = var.folder_id
+
+  route_table_id = yandex_vpc_route_table.weather_rt.id
 }
 
-resource "yandex_mdb_postgresql_cluster" "weather_db" {
-  name        = "weather-db"
-  environment = "PRODUCTION"
+# ============================================================================
+# Security Group для PostgreSQL (доступ только из подсети функций)
+# ============================================================================
+
+resource "yandex_vpc_security_group" "weather_db_sg" {
+  name        = "weather-db-security-group"
+  description = "Security group for Weather PostgreSQL cluster"
   network_id  = yandex_vpc_network.weather_network.id
   folder_id   = var.folder_id
 
+  ingress {
+    description    = "PostgreSQL from functions in VPC"
+    protocol       = "TCP"
+    port           = 6432
+    v4_cidr_blocks = ["10.1.0.0/24"]
+  }
+
+  egress {
+    description    = "All outbound"
+    protocol       = "ANY"
+    port           = -1
+    v4_cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# ============================================================================
+# Managed PostgreSQL (без публичного IP)
+# ============================================================================
+
+resource "yandex_mdb_postgresql_cluster" "weather_db" {
+  name               = "weather-db"
+  environment        = "PRODUCTION"
+  network_id         = yandex_vpc_network.weather_network.id
+  folder_id          = var.folder_id
+  security_group_ids = [yandex_vpc_security_group.weather_db_sg.id]
+
   config {
     version = "14"
+
     resources {
       resource_preset_id = "s2.micro"
       disk_type_id       = "network-ssd"
@@ -98,7 +142,7 @@ resource "yandex_mdb_postgresql_database" "weather_stats" {
 }
 
 # ============================================================================
-# Object Storage для статической страницы
+# Object Storage: бакет для статической страницы + ключи
 # ============================================================================
 
 resource "yandex_iam_service_account" "storage_sa" {
@@ -144,7 +188,7 @@ resource "yandex_storage_bucket" "weather_static" {
   }
 }
 
-# Простая HTML страница с автоопределением геолокации
+# Простая HTML-страница с автоопределением геолокации (должен существовать ./static/index.html)
 resource "yandex_storage_object" "index_html" {
   access_key   = yandex_iam_service_account_static_access_key.storage_key.access_key
   secret_key   = yandex_iam_service_account_static_access_key.storage_key.secret_key
@@ -155,28 +199,36 @@ resource "yandex_storage_object" "index_html" {
   content = templatefile("${path.module}/static/index.html", {
     api_gateway_url = yandex_api_gateway.weather_api.domain
   })
-
 }
 
 # ============================================================================
-# Cloud Functions
+# Cloud Functions: обе функции в одной VPC (connectivity), без публичных IP
 # ============================================================================
 
-# Function 2: Weather Forecast (создаем первой)
+# Function 2: Weather Forecast
 resource "yandex_function" "weather_forecast" {
   name               = "weather-forecast"
   description        = "Function to get weather forecast from external API"
-  user_hash          = "weather-forecast-v1"
-  runtime            = "python39"
-  entrypoint         = "index.handler"
+  user_hash          = "weather-forecast-v2"
+  runtime            = "python311"
+  entrypoint         = "function2_weather_forecast.handler"
   memory             = "128"
   execution_timeout  = "30"
   service_account_id = yandex_iam_service_account.weather_sa.id
   folder_id          = var.folder_id
 
+  # Подключение к VPC (для выхода через NAT и, при необходимости, доступов к приватным ресурсам)
+  connectivity {
+    network_id = yandex_vpc_network.weather_network.id
+    subnet_ids = [yandex_vpc_subnet.weather_subnet.id]
+  }
+
   environment = {
+    # Если ключ пустой, в коде F2 вернутся mock-данные
     WEATHER_API_KEY = var.weather_api_key != "" ? var.weather_api_key : "mock"
   }
+
+  # Ожидается архив с кодом (в корне должен лежать function2_weather_forecast.py)
   content {
     zip_filename = "weather_forecast.zip"
   }
@@ -186,21 +238,32 @@ resource "yandex_function" "weather_forecast" {
 resource "yandex_function" "weather_context" {
   name               = "weather-context"
   description        = "Function to save user statistics and call weather forecast"
-  user_hash          = "weather-context-v1"
-  runtime            = "python39"
-  entrypoint         = "index.handler"
+  user_hash          = "weather-context-v2"
+  runtime            = "python311"
+  entrypoint         = "function1_weather_context.handler"
   memory             = "128"
   execution_timeout  = "30"
   service_account_id = yandex_iam_service_account.weather_sa.id
   folder_id          = var.folder_id
 
+  connectivity {
+    network_id = yandex_vpc_network.weather_network.id
+    subnet_ids = [yandex_vpc_subnet.weather_subnet.id]
+  }
+
+  # Важное: тут мы НЕ делаем публичный HTTP-триггер F2.
+  # F1 вызывает F2 через Invoke API (https://functions.yandexcloud.net/<function_id>)
+  # c IAM-токеном; NAT обеспечивает исходящий интернет.
   environment = {
-    DB_HOST              = yandex_mdb_postgresql_cluster.weather_db.host[0].fqdn
-    DB_NAME              = "weather_stats"
-    DB_USER              = "weather_user"
-    DB_PASSWORD          = "WeatherPass123!"
-    DB_PORT              = "6432"
+    DB_HOST     = yandex_mdb_postgresql_cluster.weather_db.host[0].fqdn
+    DB_NAME     = "weather_stats"
+    DB_USER     = "weather_user"
+    DB_PASSWORD = "WeatherPass123!"
+    DB_PORT     = "6432"
+
     FORECAST_FUNCTION_ID = yandex_function.weather_forecast.id
+    # Опционально (если хочешь переопределить endpoint):
+    # CLOUD_FUNCTIONS_API_ENDPOINT = "https://functions.yandexcloud.net"
   }
 
   content {
@@ -211,7 +274,7 @@ resource "yandex_function" "weather_context" {
 }
 
 # ============================================================================
-# API Gateway
+# API Gateway: статическая страница и маршрут /weather -> F1
 # ============================================================================
 
 resource "yandex_api_gateway" "weather_api" {
@@ -267,7 +330,7 @@ paths:
             default: 5
             minimum: 1
             maximum: 7
-          description: Number of forecast days
+          description: Number of forecast days (1..7)
         - name: user_id
           in: query
           required: false
@@ -281,17 +344,6 @@ paths:
             application/json:
               schema:
                 type: object
-                properties:
-                  location:
-                    type: string
-                  country:
-                    type: string
-                  forecast_days:
-                    type: integer
-                  forecast:
-                    type: array
-                    items:
-                      type: object
         '400':
           description: Bad request
         '500':
@@ -319,7 +371,7 @@ paths:
       x-yc-apigateway-integration:
         type: dummy
         content:
-          '*': '{"status": "healthy", "timestamp": "2025-09-16T12:00:00Z"}'
+          '*': '{"status": "healthy"}'
         http_code: 200
         http_headers:
           'Content-Type': 'application/json'
@@ -334,36 +386,11 @@ EOT
 }
 
 # ============================================================================
-# Security Group для PostgreSQL
-# ============================================================================
-
-resource "yandex_vpc_security_group" "weather_db_sg" {
-  name        = "weather-db-security-group"
-  description = "Security group for Weather PostgreSQL cluster"
-  network_id  = yandex_vpc_network.weather_network.id
-  folder_id   = var.folder_id
-
-  ingress {
-    description    = "PostgreSQL from functions"
-    port           = 6432
-    protocol       = "TCP"
-    v4_cidr_blocks = ["10.1.0.0/24"]
-  }
-
-  egress {
-    description    = "All outbound traffic"
-    port           = -1
-    protocol       = "ANY"
-    v4_cidr_blocks = ["0.0.0.0/0"]
-  }
-}
-
-# ============================================================================
 # Outputs
 # ============================================================================
 
 output "weather_app_url" {
-  description = "URL of the weather application"
+  description = "URL of the weather application (static page)"
   value       = yandex_api_gateway.weather_api.domain
 }
 
@@ -373,17 +400,17 @@ output "api_gateway_id" {
 }
 
 output "weather_context_function_id" {
-  description = "ID of the weather context function"
+  description = "ID of the weather context function (F1)"
   value       = yandex_function.weather_context.id
 }
 
 output "weather_forecast_function_id" {
-  description = "ID of the weather forecast function"
+  description = "ID of the weather forecast function (F2)"
   value       = yandex_function.weather_forecast.id
 }
 
 output "database_host" {
-  description = "PostgreSQL database host"
+  description = "PostgreSQL database host (private FQDN)"
   value       = yandex_mdb_postgresql_cluster.weather_db.host[0].fqdn
   sensitive   = true
 }
@@ -392,7 +419,6 @@ output "storage_bucket_name" {
   description = "Name of the storage bucket"
   value       = yandex_storage_bucket.weather_static.id
 }
-
 
 output "test_commands" {
   description = "Commands to test the application"

@@ -1,320 +1,295 @@
 import json
 import os
 import logging
+import socket
+import time
+import uuid
+from typing import Any, Dict, Tuple
+
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# ---------- ЛОГИРОВАНИЕ ----------
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+logger = logging.getLogger("weather.forecast")
 
-def handler(event, context):
-    """
-    Function 2: Weather Forecast
-    - Получает координаты и диапазон дат
-    - Обращается к Yandex Weather API для получения погодных данных
-    - Возвращает JSON с прогнозом погоды
-    """
+# ---------- ENV / ИСТОЧНИКИ ----------
+YA_WEATHER_KEY = os.getenv("WEATHER_API_KEY", "")
+USE_MOCK = (YA_WEATHER_KEY.strip().lower() == "mock" or YA_WEATHER_KEY.strip() == "")
+
+# Можно переключиться на Open-Meteo без ключа, если нужно:
+OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
+
+
+# ---------- ВСПОМОГАТЕЛЬНЫЕ ----------
+def _ok(payload: Dict[str, Any], status: int = 200) -> Dict[str, Any]:
+    return {"statusCode": status, "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+            "body": json.dumps(payload, ensure_ascii=False)}
+
+def _err(msg: str, status: int = 400, extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    body = {"error": msg}
+    if extra:
+        body.update(extra)
+    return {"statusCode": status, "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+            "body": json.dumps(body, ensure_ascii=False)}
+
+def _parse_event(event: Dict[str, Any]) -> Tuple[float, float, int, str]:
+    # поддержа queryStringParameters, JSON body и “плоский” event
+    body = {}
+    if "body" in event:
+        if isinstance(event["body"], str):
+            try:
+                body = json.loads(event["body"])
+            except Exception:
+                body = {}
+        elif isinstance(event["body"], dict):
+            body = event["body"]
+
+    qs = event.get("queryStringParameters") or {}
+    if not isinstance(qs, dict):
+        qs = {}
+
+    src = body if body else event
+    lat = _first_non_none(qs.get("lat"), src.get("lat"))
+    lon = _first_non_none(qs.get("lon"), src.get("lon"))
+    days = _first_non_none(qs.get("days"), src.get("days"), 5)
+    req_id = _first_non_none(qs.get("request_id"), src.get("request_id"), str(uuid.uuid4()))
+
     try:
-        # Парсим входные данные
-        if isinstance(event.get('body'), str):
-            body = json.loads(event['body'])
-        else:
-            body = event.get('body', {})
-        
-        lat = body.get('lat')
-        lon = body.get('lon')
-        days = int(body.get('days', 5))
-        
-        if lat is None or lon is None:
-            return {
-                'statusCode': 400,
-                'body': json.dumps({
-                    'error': 'Latitude and longitude parameters are required'
-                })
-            }
-        
-        logger.info(f"Getting weather forecast for coordinates: {lat}, {lon}, days: {days}")
-        
-        # Получаем прогноз погоды
-        forecast_data = get_weather_forecast(lat, lon, days)
-        
-        return {
-            'statusCode': 200,
-            'body': json.dumps(forecast_data, ensure_ascii=False)
-        }
-        
-    except Exception as e:
-        logger.error(f"Error in weather forecast function: {str(e)}")
-        return {
-            'statusCode': 500,
-            'body': json.dumps({
-                'error': 'Internal server error',
-                'details': str(e)
-            })
-        }
+        lat = float(lat)
+        lon = float(lon)
+        days = int(days)
+    except (TypeError, ValueError):
+        raise ValueError("lat/lon must be numeric and days must be integer")
 
-def get_weather_forecast(lat, lon, days):
-    """Получает прогноз погоды из Yandex Weather API по координатам"""
-    try:
-        # Используем Yandex Weather API
-        api_key = os.environ.get('WEATHER_API_KEY')
-        
-        if not api_key or api_key == "mock":
-            # Если нет API ключа, возвращаем mock данные
-            logger.warning("No Yandex Weather API key provided, returning mock data")
-            return generate_mock_forecast_by_coords(lat, lon, days)
-        
-        # URL Yandex Weather API
-        weather_url = "https://api.weather.yandex.ru/v2/forecast"
-        
-        # Параметры запроса
-        headers = {
-            'X-Yandex-API-Key': api_key
-        }
-        
-        params = {
-            'lat': lat,
-            'lon': lon,
-            'lang': 'ru_RU',
-            'limit': min(days, 7),  # Yandex API поддерживает до 7 дней
-            'hours': False,  # Получаем только дневные прогнозы
-            'extra': False   # Без дополнительных данных
-        }
-        
-        response = requests.get(weather_url, headers=headers, params=params, timeout=10)
-        
-        if response.status_code != 200:
-            logger.error(f"Yandex Weather API error: {response.status_code}")
-            if response.status_code == 403:
-                logger.error("API key invalid or rate limit exceeded")
-            return generate_mock_forecast_by_coords(lat, lon, days)
-        
-        weather_data = response.json()
-        
-        # Обрабатываем данные от Yandex Weather API
-        forecast = process_yandex_weather_data(weather_data, days)
-        
-        return forecast
-        
-    except requests.RequestException as e:
-        logger.error(f"Request error: {str(e)}")
-        return generate_mock_forecast_by_coords(lat, lon, days)
-    except Exception as e:
-        logger.error(f"Error getting weather forecast: {str(e)}")
-        return generate_mock_forecast_by_coords(lat, lon, days)
+    if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+        raise ValueError("lat must be [-90..90], lon must be [-180..180]")
+    if not (1 <= days <= 7):
+        raise ValueError("days must be in range 1..7")
 
-def process_yandex_weather_data(data, requested_days):
-    """Обрабатывает данные от Yandex Weather API"""
-    try:
-        # Получаем информацию о местоположении
-        location_info = data.get('info', {})
-        location_name = f"{location_info.get('lat', 0):.3f}, {location_info.get('lon', 0):.3f}"
-        
-        # Пытаемся получить более читаемое название места
-        if 'tzinfo' in location_info:
-            tz_name = location_info['tzinfo'].get('name', '')
-            if '/' in tz_name:
-                location_name = tz_name.split('/')[-1].replace('_', ' ')
-        
-        # Текущая погода
-        fact = data.get('fact', {})
-        
-        # Прогнозы по дням
-        forecasts = data.get('forecasts', [])
-        forecast_list = []
-        
-        for i, day_forecast in enumerate(forecasts[:requested_days]):
-            date_str = day_forecast.get('date', '')
-            
-            # Информация о дне
-            day_info = day_forecast.get('parts', {}).get('day', {})
-            
-            # Температура
-            temp_avg = day_info.get('temp_avg')
-            temp_min = day_info.get('temp_min') 
-            temp_max = day_forecast.get('parts', {}).get('day_short', {}).get('temp_max')
-            feels_like = day_info.get('feels_like', temp_avg)
-            
-            # Используем данные из fact для первого дня, если доступны
-            if i == 0 and fact:
-                temp_avg = fact.get('temp', temp_avg)
-                feels_like = fact.get('feels_like', feels_like)
-            
-            # Погодные условия
-            condition = day_info.get('condition', 'clear')
-            condition_description = get_condition_description(condition)
-            
-            forecast_item = {
-                'date': date_str,
-                'temperature': {
-                    'day': int(temp_avg) if temp_avg is not None else 0,
-                    'min': int(temp_min) if temp_min is not None else int(temp_avg or 0) - 3,
-                    'max': int(temp_max) if temp_max is not None else int(temp_avg or 0) + 3,
-                    'feels_like': int(feels_like) if feels_like is not None else int(temp_avg or 0)
-                },
-                'weather': {
-                    'main': condition.title(),
-                    'description': condition_description,
-                    'icon': get_weather_icon_from_condition(condition)
-                },
-                'humidity': day_info.get('humidity', 50),
-                'pressure': day_info.get('pressure_mm', 760),
-                'wind_speed': day_info.get('wind_speed', 0),
-                'clouds': get_cloudiness_from_condition(condition),
-                'wind_direction': day_info.get('wind_dir', 'n')
-            }
-            
-            forecast_list.append(forecast_item)
-        
-        return {
-            'location': location_name,
-            'country': 'RU',
-            'coordinates': f"{location_info.get('lat', 0)}, {location_info.get('lon', 0)}",
-            'forecast_days': len(forecast_list),
-            'forecast': forecast_list,
-            'generated_at': datetime.now().isoformat(),
-            'data_source': 'Yandex Weather API'
-        }
-        
-    except Exception as e:
-        logger.error(f"Error processing Yandex Weather data: {str(e)}")
-        return generate_mock_forecast_by_coords(
-            data.get('info', {}).get('lat', 0),
-            data.get('info', {}).get('lon', 0),
-            requested_days
-        )
+    return lat, lon, days, str(req_id)
 
-def get_condition_description(condition):
-    """Переводит коды погодных условий Yandex API в описания"""
-    conditions = {
-        'clear': 'ясно',
-        'partly-cloudy': 'малооблачно', 
-        'cloudy': 'облачно',
-        'overcast': 'пасмурно',
-        'light-rain': 'небольшой дождь',
-        'rain': 'дождь',
-        'heavy-rain': 'сильный дождь',
-        'showers': 'ливень',
-        'wet-snow': 'дождь со снегом',
-        'light-snow': 'небольшой снег',
-        'snow': 'снег',
-        'snow-showers': 'снегопад',
-        'hail': 'град',
-        'thunderstorm': 'гроза',
-        'thunderstorm-with-rain': 'дождь с грозой',
-        'thunderstorm-with-hail': 'гроза с градом'
+def _first_non_none(*vals):
+    for v in vals:
+        if v is not None:
+            return v
+    return None
+
+# ---------- ВНЕШНИЕ ИСТОЧНИКИ ----------
+def _get_from_yandex_weather(lat: float, lon: float, days: int, req_id: str) -> Dict[str, Any]:
+    url = "https://api.weather.yandex.ru/v2/forecast"
+    headers = {"X-Yandex-API-Key": YA_WEATHER_KEY}
+    params = {
+        "lat": lat,
+        "lon": lon,
+        "lang": "ru_RU",
+        "limit": min(days, 7),
+        "hours": False,
+        "extra": False,
     }
-    return conditions.get(condition, condition)
+    start = time.time()
+    r = requests.get(url, headers=headers, params=params, timeout=8)
+    elapsed = (time.time() - start) * 1000
+    logger.info("yandex_req req_id=%s status=%s elapsed_ms=%.1f url=%s", req_id, r.status_code, elapsed, r.url)
+    if not r.ok:
+        raise RuntimeError(f"yandex_status={r.status_code}")
+    return r.json()
 
-def get_weather_icon_from_condition(condition):
-    """Возвращает emoji иконку для погодного условия"""
-    icons = {
-        'clear': '☀️',
-        'partly-cloudy': '⛅',
-        'cloudy': '☁️', 
-        'overcast': '☁️',
-        'light-rain': '🌦️',
-        'rain': '🌧️',
-        'heavy-rain': '🌧️',
-        'showers': '🌧️',
-        'wet-snow': '🌨️',
-        'light-snow': '❄️',
-        'snow': '❄️',
-        'snow-showers': '🌨️',
-        'hail': '🌨️',
-        'thunderstorm': '⛈️',
-        'thunderstorm-with-rain': '⛈️',
-        'thunderstorm-with-hail': '⛈️'
+def _get_from_open_meteo(lat: float, lon: float, days: int, req_id: str) -> Dict[str, Any]:
+    # fallback без ключа
+    start = date.today()
+    end = start + timedelta(days=days - 1)
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "daily": ["temperature_2m_max", "temperature_2m_min", "precipitation_sum", "windspeed_10m_max"],
+        "timezone": "auto",
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
     }
-    return icons.get(condition, '🌤️')
+    t0 = time.time()
+    r = requests.get(OPEN_METEO_URL, params=params, timeout=8)
+    elapsed = (time.time() - t0) * 1000
+    logger.info("openmeteo_req req_id=%s status=%s elapsed_ms=%.1f url=%s", req_id, r.status_code, elapsed, r.url)
+    if not r.ok:
+        raise RuntimeError(f"openmeteo_status={r.status_code}")
+    return r.json()
 
-def get_cloudiness_from_condition(condition):
-    """Возвращает примерную облачность в процентах на основе условий"""
-    cloudiness = {
-        'clear': 10,
-        'partly-cloudy': 30,
-        'cloudy': 70,
-        'overcast': 100,
-        'light-rain': 80,
-        'rain': 90,
-        'heavy-rain': 100,
-        'showers': 90,
-        'wet-snow': 90,
-        'light-snow': 80,
-        'snow': 90,
-        'snow-showers': 100,
-        'hail': 100,
-        'thunderstorm': 90,
-        'thunderstorm-with-rain': 95,
-        'thunderstorm-with-hail': 100
-    }
-    return cloudiness.get(condition, 50)
+# ---------- НОРМАЛИЗАЦИЯ ----------
+def _normalize_yandex(data: Dict[str, Any], requested_days: int, lat: float, lon: float) -> Dict[str, Any]:
+    location_info = data.get("info", {})
+    tz_name = (location_info.get("tzinfo") or {}).get("name", "")
+    location_name = tz_name.split("/")[-1].replace("_", " ") if "/" in tz_name else f"{lat:.3f}, {lon:.3f}"
 
-def generate_mock_forecast_by_coords(lat, lon, days):
-    """Генерирует mock данные о погоде для координат"""
-    logger.info(f"Generating mock forecast for coordinates {lat}, {lon}")
-    
-    import random
-    
-    # Определяем примерное название места по координатам (очень упрощенно)
-    location_name = f"Location ({lat:.2f}, {lon:.2f})"
-    
-    # Примерная температура в зависимости от широты и времени года
-    import datetime
-    month = datetime.datetime.now().month
-    
-    if abs(lat) > 60:
-        base_temp = random.randint(-15, 5) if month in [11,12,1,2,3] else random.randint(-5, 15)
-    elif abs(lat) > 40:
-        base_temp = random.randint(-5, 15) if month in [11,12,1,2,3] else random.randint(5, 25)
-    else:
-        base_temp = random.randint(10, 25) if month in [11,12,1,2,3] else random.randint(20, 35)
-    
-    forecast_list = []
-    
-    weather_conditions = [
-        {'condition': 'clear', 'description': 'ясно', 'icon': '☀️'},
-        {'condition': 'partly-cloudy', 'description': 'малооблачно', 'icon': '⛅'},
-        {'condition': 'cloudy', 'description': 'облачно', 'icon': '☁️'},
-        {'condition': 'rain', 'description': 'дождь', 'icon': '🌧️'},
-        {'condition': 'snow', 'description': 'снег', 'icon': '❄️'} if base_temp < 5 else {'condition': 'clear', 'description': 'ясно', 'icon': '☀️'}
-    ]
-    
-    for i in range(days):
-        date = datetime.datetime.now() + timedelta(days=i)
-        temp_variation = random.randint(-5, 5)
-        temp = base_temp + temp_variation
-        
-        weather = random.choice(weather_conditions)
-        
-        forecast_list.append({
-            'date': date.strftime('%Y-%m-%d'),
-            'temperature': {
-                'day': temp,
-                'min': temp - random.randint(2, 5),
-                'max': temp + random.randint(2, 5),
-                'feels_like': temp + random.randint(-2, 2)
+    fact = data.get("fact", {})
+    forecasts = data.get("forecasts", [])[:requested_days]
+    out = []
+    for i, d in enumerate(forecasts):
+        parts = d.get("parts", {})
+        day = parts.get("day", {}) or parts.get("day_short", {}) or {}
+        cond = day.get("condition", "clear")
+        temp_avg = day.get("temp_avg", fact.get("temp") if i == 0 else None)
+        temp_min = day.get("temp_min", None)
+        temp_max = parts.get("day_short", {}).get("temp_max", None)
+        feels = day.get("feels_like", temp_avg)
+        out.append({
+            "date": d.get("date"),
+            "temperature": {
+                "day": _i(temp_avg, 0),
+                "min": _i(temp_min, _i(temp_avg, 0) - 3),
+                "max": _i(temp_max, _i(temp_avg, 0) + 3),
+                "feels_like": _i(feels, _i(temp_avg, 0)),
             },
-            'weather': {
-                'main': weather['condition'].title(),
-                'description': weather['description'],
-                'icon': weather['icon']
+            "weather": {
+                "main": cond.title(),
+                "description": _condition_desc(cond),
+                "icon": _icon(cond),
             },
-            'humidity': random.randint(40, 80),
-            'pressure': random.randint(745, 770),
-            'wind_speed': round(random.uniform(1.0, 8.0), 1),
-            'clouds': get_cloudiness_from_condition(weather['condition']),
-            'wind_direction': random.choice(['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw'])
+            "humidity": day.get("humidity", 50),
+            "pressure": day.get("pressure_mm", 760),
+            "wind_speed": day.get("wind_speed", 0),
+            "clouds": _clouds(cond),
+            "wind_direction": day.get("wind_dir", "n"),
         })
-    
     return {
-        'location': location_name,
-        'country': 'RU',
-        'coordinates': f"{lat}, {lon}",
-        'forecast_days': days,
-        'forecast': forecast_list,
-        'generated_at': datetime.now().isoformat(),
-        'data_source': 'Mock data для демонстрации',
-        'note': 'Демонстрационные данные - получите API ключ Yandex Weather для реальных данных'
+        "location": location_name,
+        "coordinates": f"{lat},{lon}",
+        "forecast_days": len(out),
+        "forecast": out,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "data_source": "Yandex Weather API",
     }
+
+def _normalize_open_meteo(data: Dict[str, Any], requested_days: int, lat: float, lon: float) -> Dict[str, Any]:
+    daily = data.get("daily", {})
+    dates = daily.get("time", [])[:requested_days]
+    out = []
+    for i, day in enumerate(dates):
+        out.append({
+            "date": day,
+            "temperature": {
+                "day": _i(_avg(daily.get("temperature_2m_min", []), daily.get("temperature_2m_max", []), i), 0),
+                "min": _i(_safe_idx(daily.get("temperature_2m_min", []), i), 0),
+                "max": _i(_safe_idx(daily.get("temperature_2m_max", []), i), 0),
+                "feels_like": _i(_avg(daily.get("temperature_2m_min", []), daily.get("temperature_2m_max", []), i), 0),
+            },
+            "weather": {
+                "main": "N/A",
+                "description": "open-meteo daily",
+                "icon": "🌤️",
+            },
+            "humidity": None,
+            "pressure": None,
+            "wind_speed": _safe_idx(daily.get("windspeed_10m_max", []), i),
+            "clouds": None,
+            "wind_direction": None,
+        })
+    return {
+        "location": f"{lat:.3f}, {lon:.3f}",
+        "coordinates": f"{lat},{lon}",
+        "forecast_days": len(out),
+        "forecast": out,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "data_source": "open-meteo.com",
+    }
+
+def _safe_idx(arr, idx):
+    try:
+        return arr[idx]
+    except Exception:
+        return None
+
+def _avg(a, b, i):
+    va = _safe_idx(a, i)
+    vb = _safe_idx(b, i)
+    if va is None and vb is None:
+        return None
+    if va is None:
+        return vb
+    if vb is None:
+        return va
+    return (va + vb) / 2
+
+def _i(v, default):
+    try:
+        return int(v)
+    except Exception:
+        return default
+
+def _condition_desc(c: str) -> str:
+    mapping = {
+        "clear": "ясно",
+        "partly-cloudy": "малооблачно",
+        "cloudy": "облачно",
+        "overcast": "пасмурно",
+        "light-rain": "небольшой дождь",
+        "rain": "дождь",
+        "heavy-rain": "сильный дождь",
+        "showers": "ливень",
+        "wet-snow": "дождь со снегом",
+        "light-snow": "небольшой снег",
+        "snow": "снег",
+        "snow-showers": "снегопад",
+        "hail": "град",
+        "thunderstorm": "гроза",
+        "thunderstorm-with-rain": "дождь с грозой",
+        "thunderstorm-with-hail": "гроза с градом",
+    }
+    return mapping.get(c, c)
+
+def _icon(c: str) -> str:
+    mapping = {
+        "clear": "☀️", "partly-cloudy": "⛅", "cloudy": "☁️", "overcast": "☁️",
+        "light-rain": "🌦️", "rain": "🌧️", "heavy-rain": "🌧️", "showers": "🌧️",
+        "wet-snow": "🌨️", "light-snow": "❄️", "snow": "❄️", "snow-showers": "🌨️",
+        "hail": "🌨️", "thunderstorm": "⛈️", "thunderstorm-with-rain": "⛈️", "thunderstorm-with-hail": "⛈️",
+    }
+    return mapping.get(c, "🌤️")
+
+def _clouds(c: str) -> int | None:
+    mapping = {
+        "clear": 10, "partly-cloudy": 30, "cloudy": 70, "overcast": 100,
+        "light-rain": 80, "rain": 90, "heavy-rain": 100, "showers": 90,
+        "wet-snow": 90, "light-snow": 80, "snow": 90, "snow-showers": 100,
+        "hail": 100, "thunderstorm": 90, "thunderstorm-with-rain": 95, "thunderstorm-with-hail": 100,
+    }
+    return mapping.get(c, 50)
+
+# ---------- HANDLER ----------
+def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+    host = socket.gethostname()
+    try:
+        lat, lon, days, req_id = _parse_event(event)
+    except ValueError as ve:
+        logger.warning("f2_validation_fail host=%s error=%s event_keys=%s", host, ve, list(event.keys()))
+        return _err(str(ve), 400)
+
+    logger.info(
+        "f2_in host=%s req_id=%s lat=%.4f lon=%.4f days=%d ya_key=%s",
+        host, req_id, lat, lon, days, "set" if not USE_MOCK else "mock",
+    )
+
+    try:
+        t0 = time.time()
+        if not USE_MOCK:
+            raw = _get_from_yandex_weather(lat, lon, days, req_id)
+            norm = _normalize_yandex(raw, days, lat, lon)
+        else:
+            raw = _get_from_open_meteo(lat, lon, days, req_id)
+            norm = _normalize_open_meteo(raw, days, lat, lon)
+
+        elapsed = (time.time() - t0) * 1000
+        logger.info("f2_ok req_id=%s source=%s elapsed_ms=%.1f", req_id, norm.get("data_source"), elapsed)
+        norm["req_id"] = req_id
+        return _ok(norm)
+
+    except requests.RequestException as re:
+        logger.exception("f2_http_fail req_id=%s detail=%s", req_id, re)
+        return _err("Upstream weather provider failed", 502, {"req_id": req_id})
+    except Exception as e:
+        logger.exception("f2_unhandled req_id=%s detail=%s", req_id, e)
+        return _err("Internal error", 500, {"req_id": req_id})
