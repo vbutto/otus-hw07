@@ -131,7 +131,7 @@
     </div>
 
     <script>
-        const API_BASE_URL = '${api_gateway_url}';
+        var API_BASE_URL = '${api_gateway_url}';
 
         // Автоматически начинаем процесс при загрузке страницы
         window.addEventListener('load', function () {
@@ -144,7 +144,7 @@
                 return;
             }
 
-            const options = {
+            var options = {
                 enableHighAccuracy: true,
                 timeout: 15000,
                 maximumAge: 300000
@@ -152,13 +152,13 @@
 
             navigator.geolocation.getCurrentPosition(
                 function (position) {
-                    const lat = position.coords.latitude;
-                    const lon = position.coords.longitude;
+                    var lat = position.coords.latitude;
+                    var lon = position.coords.longitude;
                     showCoordinates(lat, lon, position.coords.accuracy);
                     getWeather(lat, lon);
                 },
                 function (error) {
-                    let message = 'Не удалось определить местоположение: ';
+                    var message = 'Не удалось определить местоположение: ';
                     switch (error.code) {
                         case error.PERMISSION_DENIED:
                             message += 'Доступ запрещен. Разрешите геолокацию в браузере.';
@@ -179,91 +179,92 @@
         }
 
         function showCoordinates(lat, lon, accuracy) {
-            const coordsDiv = document.getElementById('coordinates');
+            var coordsDiv = document.getElementById('coordinates');
             coordsDiv.style.display = 'block';
-            coordsDiv.innerHTML = `
-                <strong>📍 Ваши координаты:</strong><br>
-                Широта: ${lat.toFixed(6)}<br>
-                Долгота: ${lon.toFixed(6)}<br>
-                ${accuracy ? `Точность: ±${Math.round(accuracy)} метров` : ''}
-            `;
+            var html = '<strong>📍 Ваши координаты:</strong><br>';
+            html += 'Широта: ' + lat.toFixed(6) + '<br>';
+            html += 'Долгота: ' + lon.toFixed(6) + '<br>';
+            if (accuracy) {
+                html += 'Точность: ±' + Math.round(accuracy) + ' метров';
+            }
+            coordsDiv.innerHTML = html;
         }
 
-        async function getWeather(lat, lon) {
-            try {
-                showStatus('Получаем прогноз погоды...', 'loading');
+        function getWeather(lat, lon) {
+            showStatus('Получаем прогноз погоды...', 'loading');
 
-                const userId = 'web_' + Math.random().toString(36).substr(2, 9);
-                const days = 5;
+            var userId = 'web_' + Math.random().toString(36).substr(2, 9);
+            var days = 5;
 
-                const response = await fetch(
-                    `${API_BASE_URL}/weather?lat=${lat}&lon=${lon}&days=${days}&user_id=${userId}`
-                );
+            var url = API_BASE_URL + '/weather?lat=' + lat + '&lon=' + lon + '&days=' + days + '&user_id=' + userId;
 
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-                }
-
-                const data = await response.json();
-
-                if (data.error) {
-                    throw new Error(data.error);
-                }
-
-                showWeather(data);
-                showStatus('Прогноз погоды успешно получен!', 'success');
-
-            } catch (error) {
-                console.error('Weather API error:', error);
-                showError(`Ошибка получения погоды: ${error.message}`);
-            }
+            fetch(url)
+                .then(function (response) {
+                    if (!response.ok) {
+                        throw new Error('HTTP ' + response.status + ': ' + response.statusText);
+                    }
+                    return response.json();
+                })
+                .then(function (data) {
+                    if (data.error) {
+                        throw new Error(data.error);
+                    }
+                    showWeather(data);
+                    showStatus('Прогноз погоды успешно получен!', 'success');
+                })
+                .catch(function (error) {
+                    console.error('Weather API error:', error);
+                    showError('Ошибка получения погоды: ' + error.message);
+                });
         }
 
         function showWeather(data) {
-            const weatherDiv = document.getElementById('weather');
+            var weatherDiv = document.getElementById('weather');
             weatherDiv.style.display = 'block';
 
-            let weatherHtml = `
-                <div class="weather-info">
-                    <h3>🌍 ${data.location}${data.country ? ', ' + data.country : ''}</h3>
-                    <p>Прогноз на ${data.forecast_days} дней:</p>
-                    ${data.note ? `<p style="color: #e17055; font-style: italic;">⚠️ ${data.note}</p>` : ''}
-                    ${data.forecast.map(day => {
-                const date = new Date(day.date);
-                const dateStr = date.toLocaleDateString('ru-RU', {
+            var weatherHtml = '<div class="weather-info">';
+            weatherHtml += '<h3>🌍 ' + data.location + (data.country ? ', ' + data.country : '') + '</h3>';
+            weatherHtml += '<p>Прогноз на ' + data.forecast_days + ' дней:</p>';
+            if (data.note) {
+                weatherHtml += '<p style="color: #e17055; font-style: italic;">⚠️ ' + data.note + '</p>';
+            }
+
+            for (var i = 0; i < data.forecast.length; i++) {
+                var day = data.forecast[i];
+                var date = new Date(day.date);
+                var dateStr = date.toLocaleDateString('ru-RU', {
                     weekday: 'long',
                     day: 'numeric',
                     month: 'long'
                 });
-                return `
-                            <div class="weather-item">
-                                <strong>${dateStr}</strong><br>
-                                <div style="font-size: 1.5em; color: #74b9ff; margin: 10px 0;">
-                                    ${getWeatherIcon(day.weather.main)} ${day.temperature.day}°C
-                                </div>
-                                <div style="color: #636e72;">
-                                    ${day.weather.description}<br>
-                                    🌡️ от ${day.temperature.min}° до ${day.temperature.max}°C<br>
-                                    🤚 Ощущается как ${day.temperature.feels_like}°C<br>
-                                    💨 Ветер: ${day.wind_speed} м/с<br>
-                                    💧 Влажность: ${day.humidity}%<br>
-                                    ☁️ Облачность: ${day.clouds}%
-                                </div>
-                            </div>
-                        `;
-            }).join('')}
-                    <p style="text-align: center; color: #636e72; font-size: 0.9em; margin-top: 20px;">
-                        📊 Источник: ${data.data_source || 'Yandex Weather API'}<br>
-                        📅 Данные получены: ${new Date(data.generated_at).toLocaleString('ru-RU')}
-                    </p>
-                </div>
-            `;
+
+                weatherHtml += '<div class="weather-item">';
+                weatherHtml += '<strong>' + dateStr + '</strong><br>';
+                weatherHtml += '<div style="font-size: 1.5em; color: #74b9ff; margin: 10px 0;">';
+                weatherHtml += getWeatherIcon(day.weather.main) + ' ' + day.temperature.day + '°C';
+                weatherHtml += '</div>';
+                weatherHtml += '<div style="color: #636e72;">';
+                weatherHtml += day.weather.description + '<br>';
+                weatherHtml += '🌡️ от ' + day.temperature.min + '° до ' + day.temperature.max + '°C<br>';
+                weatherHtml += '🤚 Ощущается как ' + day.temperature.feels_like + '°C<br>';
+                weatherHtml += '💨 Ветер: ' + day.wind_speed + ' м/с<br>';
+                weatherHtml += '💧 Влажность: ' + day.humidity + '%<br>';
+                weatherHtml += '☁️ Облачность: ' + day.clouds + '%';
+                weatherHtml += '</div>';
+                weatherHtml += '</div>';
+            }
+
+            weatherHtml += '<p style="text-align: center; color: #636e72; font-size: 0.9em; margin-top: 20px;">';
+            weatherHtml += '📊 Источник: ' + (data.data_source || 'Yandex Weather API') + '<br>';
+            weatherHtml += '📅 Данные получены: ' + new Date(data.generated_at).toLocaleString('ru-RU');
+            weatherHtml += '</p>';
+            weatherHtml += '</div>';
 
             weatherDiv.innerHTML = weatherHtml;
         }
 
         function getWeatherIcon(weatherMain) {
-            const icons = {
+            var icons = {
                 'Clear': '☀️',
                 'Clouds': '☁️',
                 'Rain': '🌧️',
@@ -277,14 +278,11 @@
         }
 
         function showStatus(message, type) {
-            const statusDiv = document.getElementById('status');
-            statusDiv.className = `status ${type}`;
+            var statusDiv = document.getElementById('status');
+            statusDiv.className = 'status ' + type;
 
             if (type === 'loading') {
-                statusDiv.innerHTML = `
-                    <div class="spinner"></div>
-                    ${message}
-                `;
+                statusDiv.innerHTML = '<div class="spinner"></div>' + message;
             } else {
                 statusDiv.innerHTML = message;
             }
@@ -294,7 +292,7 @@
             showStatus(message, 'error');
 
             // Скрываем статус через 10 секунд
-            setTimeout(() => {
+            setTimeout(function () {
                 document.getElementById('status').style.display = 'none';
             }, 10000);
         }

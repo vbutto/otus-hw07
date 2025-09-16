@@ -75,19 +75,18 @@ resource "yandex_mdb_postgresql_cluster" "weather_db" {
     subnet_id        = yandex_vpc_subnet.weather_subnet.id
     assign_public_ip = false
   }
+}
 
-  user {
-    name     = "weather_user"
-    password = "WeatherPass123!"
-    permission {
-      database_name = "weather_stats"
-    }
-  }
+resource "yandex_mdb_postgresql_user" "weather_user" {
+  cluster_id = yandex_mdb_postgresql_cluster.weather_db.id
+  name       = "weather_user"
+  password   = "WeatherPass123!"
+}
 
-  database {
-    name  = "weather_stats"
-    owner = "weather_user"
-  }
+resource "yandex_mdb_postgresql_database" "weather_stats" {
+  cluster_id = yandex_mdb_postgresql_cluster.weather_db.id
+  name       = "weather_stats"
+  owner      = yandex_mdb_postgresql_user.weather_user.name
 }
 
 # ============================================================================
